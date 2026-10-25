@@ -928,7 +928,38 @@ var PathGeo = (function () {
     var out = mid; out.pin = pin; out.pout = pout;
     return out;
   }
-  return { points: points };
+  // Cell-sized hit regions leave only a narrow gap at each corner for diagonal moves.
+  function dragPath(start, rows, cols, from, to) {
+    // shortcut: the corner gap is not calibrated against native devices; tune after side-by-side touch testing.
+    var eps = 1e-7, corner = 0.08, half = 0.5 - eps;
+    function clamp(v, max) { return Math.max(eps * 2, Math.min(max - eps * 2, v)); }
+    var x = clamp(from[0], cols), y = clamp(from[1], rows);
+    var dx = clamp(to[0], cols) - x, dy = clamp(to[1], rows) - y;
+    if (!dx && !dy) return [];
+    var planes = [[1, 0, half], [-1, 0, half], [0, 1, half], [0, -1, half], [1, 1, 1 - corner], [1, -1, 1 - corner], [-1, 1, 1 - corner], [-1, -1, 1 - corner]];
+    var path = [], held = start, at = 0;
+    for (var step = 0; step < rows * cols; step++) {
+      var row = Math.floor(held / cols), col = held % cols, next = -1, best = Infinity;
+      for (var dr = -1; dr <= 1; dr++) for (var dc = -1; dc <= 1; dc++) {
+        var nr = row + dr, nc = col + dc;
+        if ((!dr && !dc) || nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+        var enter = at, exit = 1;
+        for (var p = 0; p < planes.length; p++) {
+          var plane = planes[p], value = plane[0] * (x - nc - 0.5) + plane[1] * (y - nr - 0.5) - plane[2];
+          var delta = plane[0] * dx + plane[1] * dy;
+          if (!delta) { if (value > 0) { exit = -1; break; } }
+          else if (delta > 0) exit = Math.min(exit, -value / delta);
+          else enter = Math.max(enter, -value / delta);
+          if (enter > exit) break;
+        }
+        if (exit > enter + eps && enter < best) { next = nr * cols + nc; best = enter; }
+      }
+      if (next < 0) break;
+      path.push(next); held = next; at = best;
+    }
+    return path;
+  }
+  return { points: points, dragPath: dragPath };
 })();
 
 // ===== SCREENSHOT VISION (pure functions on {data,width,height}) =====
@@ -2308,6 +2339,14 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     S.dirty = true;
   }
   function center(i) { return [(i % S.bd.cols + 0.5) * geo.cell, (Math.floor(i / S.bd.cols) + 0.5) * geo.cell]; }
+  var SWAP_MS = 90;
+  function orbPosition(i, slides, now) {
+    var end = center(i), slide = slides && slides[i];
+    if (!slide) return end;
+    var t = Math.max(0, Math.min(1, (now - slide.at) / SWAP_MS));
+    t = 1 - Math.pow(1 - t, 3);
+    return [slide.from[0] + (end[0] - slide.from[0]) * t, slide.from[1] + (end[1] - slide.from[1]) * t];
+  }
   function bigText(txt, x, y, size, fill, align, font) {
     ctx.save(); ctx.font = "700 " + Math.round(size) + "px " + (font || "'Chakra Petch', 'Dela Gothic One', sans-serif"); ctx.textAlign = align || "center"; ctx.textBaseline = "middle";
     ctx.lineWidth = Math.max(3, size * 0.16); ctx.strokeStyle = "rgba(0,0,0,0.85)"; ctx.strokeText(txt, x, y); ctx.fillStyle = fill; ctx.fillText(txt, x, y); ctx.restore();
@@ -2340,14 +2379,14 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     }
     if (hasFlag(i, F_CLOUD)) drawCloud(ctx, p[0], p[1], c, inPlay ? 1 : 0.55);
   }
-  // opts: skip (cell drawn elsewhere), roulFrac, inPlay (clouds opaque), lowConf, hidden (super darkness)
+  // opts: skip (cell drawn elsewhere), slides/slideTime, roulFrac, inPlay (clouds opaque), lowConf, hidden (super darkness)
   function drawBoardState(b, now, opts) {
     opts = opts || {};
     var c = geo.cell;
     drawTiles();
     for (var i = 0; i < b.length; i++) {
       if (i === opts.skip) continue;
-      var p = center(i);
+      var p = orbPosition(i, opts.slides, opts.slideTime == null ? now : opts.slideTime);
       if (b[i] < 0) { ctx.save(); ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(p[0], p[1], c * 0.36, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
       else if (opts.hidden && opts.hidden[i]) drawHidden(ctx, p[0], p[1], c);
       else drawOrb(ctx, p[0], p[1], c * 0.94, b[i]);
@@ -2451,7 +2490,7 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     } else if (S.phase === "moving") {
       var m = S.move;
       var mask = hideMask(m.seen), hide = mask[m.held];
-      drawBoardState(m.b, now, { skip: m.held, roulFrac: roulFrac, hidden: mask });
+      drawBoardState(m.b, now, { skip: m.held, slides: m.slides, roulFrac: roulFrac, hidden: mask });
       var hc = center(m.held);
       ctx.save(); ctx.globalAlpha = 0.35; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(hc[0], hc[1], c * 0.42, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
       ctx.save(); ctx.shadowColor = "rgba(0,0,0,0.65)"; ctx.shadowBlur = 16;
@@ -2464,7 +2503,9 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
       hpCorner(m.dmg);
     } else if (S.phase === "resolving" || S.phase === "replay-resolve") {
       var res = S.phase === "resolving" ? S.res : S.replay.res, tt = (now - S.resT0) / 1000 * (S.phase === "resolving" ? 1 : S.replay.speed);
-      var n = drawResolve(res, Math.min(tt, res.tl.total), now);
+      var n = 0;
+      if (tt < 0) drawBoardState(res.after, now, { slides: res.slides, slideTime: S.phase === "resolving" ? now : (now - S.replay.t0) * S.replay.speed });
+      else n = drawResolve(res, Math.min(tt, res.tl.total), now);
       bigText(n + " COMBO", geo.W - c * 0.15, c * 0.32, c * 0.4, "#ffd36b", "right");
       hpCorner(res.dmg + (tt > 0.15 ? res.sim.bombDmg : 0));
     } else if (S.phase === "done") {
@@ -2523,7 +2564,7 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     if (!E.movable(S.live[i])) { note(t("nStone"), "bad"); return; }
     if (S.bd.start >= 0 && i !== S.bd.start) { noteKey("nFixedStart", null, "bad"); S.dirty = true; return; }
     var now = performance.now();
-    S.move = { b: S.live.slice(), start: S.live.slice(), held: i, path: [i], ev: [], t0: now, tFirst: 0, deadline: 0, px: p.x, py: p.y, dmg: 0, seen: S.live.map(function () { return false; }) };
+    S.move = { b: S.live.slice(), start: S.live.slice(), held: i, path: [i], ev: [], slides: {}, t0: now, tFirst: 0, deadline: 0, px: p.x, py: p.y, dmg: 0, seen: S.live.map(function () { return false; }) };
     if (S.mode === "hell" && S.hell && S.hell.deadline) { S.move.tFirst = S.hell.tStart; S.move.deadline = S.hell.deadline; }
     S.phase = "moving"; S.spot = [p.x, p.y];
     try { cv.setPointerCapture(e.pointerId); } catch (err) {}
@@ -2531,19 +2572,17 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
   }
   function moveTo(x, y) {
     var m = S.move, c = geo.cell, R = S.bd.rows, C = S.bd.cols;
+    if (m.deadline && performance.now() >= m.deadline) { finishMove(); return; }
+    var from = [m.px / c, m.py / c];
     m.px = Math.max(0, Math.min(geo.W, x)); m.py = Math.max(0, Math.min(geo.H, y));
-    for (var guard = 0; guard < 30; guard++) {
-      var hr = Math.floor(m.held / C), hc = m.held % C;
-      var pr = Math.max(0, Math.min(R - 1, Math.floor(m.py / c))), pc = Math.max(0, Math.min(C - 1, Math.floor(m.px / c)));
-      if (pr === hr && pc === hc) return;
-      var nr = hr + Math.sign(pr - hr), nc = hc + Math.sign(pc - hc);
-      // swap only once the finger is well inside the next cell, so passing a corner doesn't swap diagonally by accident
-      if (nr === pr && nc === pc && Math.hypot(m.px - (nc + 0.5) * c, m.py - (nr + 0.5) * c) > c * 0.47) return;
-      var n = nr * C + nc;
+    var route = PathGeo.dragPath(m.held, R, C, from, [m.px / c, m.py / c]);
+    for (var step = 0; step < route.length; step++) {
+      var n = route[step];
       if (hasFlag(n, F_TAPE) || !E.movable(m.b[n])) return;
       var now = performance.now();
       if (!m.tFirst) { m.tFirst = now; if (timeLimit()) m.deadline = now + timeLimit() * 1000; if (S.mode === "hell" && S.hell) { S.hell.tStart = now; S.hell.deadline = m.deadline; } }
       if (thorny(m.b[n])) m.dmg += E.THORN_DMG; // the orb pushed aside carries thorns
+      m.slides[m.held] = { from: orbPosition(n, m.slides, now), at: now }; delete m.slides[n];
       var tmp = m.b[m.held]; m.b[m.held] = m.b[n]; m.b[n] = tmp;
       // darkness: an orb shows again once it has been moved (the one you hold and each one it pushes aside)
       m.seen[n] = true; m.seen[m.held] = true;
@@ -2565,8 +2604,9 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     var time = m.tFirst ? (Math.min(now, m.deadline || now) - m.tFirst) / 1000 : 0;
     var seed = (Math.random() * 4294967295) >>> 0;
     var res = makeResult(m.start, m.ev, now - m.t0, m.path, m.b, seed, time, m.dmg);
+    res.slides = m.slides; res.slides[m.held] = { from: [m.px, m.py], at: now };
     res.timeout = !!(m.deadline && now >= m.deadline);
-    S.res = res; S.move = null; S.resT0 = now; S.phase = "resolving"; S.dirty = true;
+    S.res = res; S.move = null; S.resT0 = now + SWAP_MS; S.phase = "resolving"; S.dirty = true;
   }
   function makeResult(start, ev, dur, path, after, seed, time, dmg) {
     var sim = E.resolve(after, S.bd.rows, S.bd.cols, { match: matchK(), skyfall: S.bd.skyfall, probs: E.skyProbs(S.bd.boosts), seed: seed });
@@ -2779,18 +2819,18 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     noteKey("nReplay", { c: rec.c, t: rec.t.toFixed(2) }, "");
   }
   function drawReplayMove(now) {
-    var rp = S.replay, rec = rp.rec, tt = (now - rp.t0) * rp.speed, b = rec.s.slice(), held = rec.p[0], steps = 0, nextT = null, dmg = 0;
+    var rp = S.replay, rec = rp.rec, tt = (now - rp.t0) * rp.speed, b = rec.s.slice(), held = rec.p[0], slides = {}, steps = 0, nextT = null, dmg = 0;
     for (var k = 0; k < rec.e.length; k++) {
       var ev = rec.e[k];
       if (ev[0] > tt) { if (ev[1] === "s" && nextT == null) nextT = ev[0]; continue; }
-      if (ev[1] === "s") { if (thorny(b[ev[3]])) dmg += E.THORN_DMG; var x = b[ev[2]]; b[ev[2]] = b[ev[3]]; b[ev[3]] = x; held = ev[3]; steps++; }
+      if (ev[1] === "s") { if (thorny(b[ev[3]])) dmg += E.THORN_DMG; slides[ev[2]] = { from: orbPosition(ev[3], slides, ev[0]), at: ev[0] }; delete slides[ev[3]]; var x = b[ev[2]]; b[ev[2]] = b[ev[3]]; b[ev[3]] = x; held = ev[3]; steps++; }
       else b[ev[2]] = ev[3];
     }
-    drawBoardState(b, now, { skip: held });
+    drawBoardState(b, now, { skip: held, slides: slides, slideTime: tt });
     drawPath(ctx, rec.p, geo.cell, steps, 0.95);
     var hc = center(held), pos = hc;
     if (nextT != null) {
-      var nextCell = rec.p[steps + 1], win = 90, f = Math.max(0, Math.min(1, (tt - (nextT - win)) / win));
+      var nextCell = rec.p[steps + 1], win = SWAP_MS, f = Math.max(0, Math.min(1, (tt - (nextT - win)) / win));
       if (nextCell != null) { var nc = center(nextCell); pos = [hc[0] + (nc[0] - hc[0]) * f, hc[1] + (nc[1] - hc[1]) * f]; }
     }
     ctx.save(); ctx.shadowColor = "rgba(0,0,0,0.65)"; ctx.shadowBlur = 16; drawOrb(ctx, pos[0], pos[1], geo.cell * 1.06, b[held], 0.96); ctx.restore();
@@ -2798,7 +2838,7 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     bigText(Math.max(0, (Math.min(tt, rec.d) - firstSwap) / 1000).toFixed(2) + "s", geo.cell * 0.15, geo.cell * 0.32, geo.cell * 0.3, "#fff", "left");
     bigText(t("cReplay") + " " + rp.speed + "×", geo.W - geo.cell * 0.15, geo.cell * 0.3, geo.cell * 0.22, "#e3b552", "right", UIFONT);
     hpCorner(dmg);
-    if (tt >= rec.d) { S.phase = "replay-resolve"; S.resT0 = now; }
+    if (tt >= rec.d) { rp.res.slides = slides; S.phase = "replay-resolve"; S.resT0 = now + SWAP_MS / rp.speed; }
   }
 
   // ---------- pool mode (experimental, just for fun) ----------
@@ -3316,10 +3356,19 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     if (S.mode === "pool") { e.preventDefault(); Pool.move(e); return; }
     var p = cellAt(e);
     if (S.edit) { if (S.painting) paintAt(e, false); return; }
-    if (S.phase === "moving") { e.preventDefault(); moveTo(p.x, p.y); }
+    if (S.phase === "moving") {
+      e.preventDefault();
+      var samples = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+      if (!samples.length) samples = [e];
+      for (var i = 0; i < samples.length && S.phase === "moving"; i++) { var q = cellAt(samples[i]); moveTo(q.x, q.y); }
+    }
     else if (ninjaOn() && S.phase === "ready" && e.pointerType === "mouse") S.spot = [p.x, p.y];
   });
-  function up() { if (S.mode === "pool") { Pool.up(); return; } S.painting = false; S.lastPaint = -1; if (S.phase === "moving") finishMove(); }
+  function up(e) {
+    if (S.mode === "pool") { Pool.up(); return; }
+    S.painting = false; S.lastPaint = -1;
+    if (S.phase === "moving") { if (e.type === "pointerup") { var p = cellAt(e); moveTo(p.x, p.y); } finishMove(); }
+  }
   cv.addEventListener("pointerup", up); cv.addEventListener("pointercancel", up);
   cv.addEventListener("pointerleave", function (e) { if (e.pointerType === "mouse" && S.phase === "ready") S.spot = null; });
 
