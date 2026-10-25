@@ -7,3 +7,7 @@ A free orb-combo practice tool. Upload a board screenshot or use a random board,
 整個網站就是一個 `index.html`，截圖只在瀏覽器內處理，不會上傳。
 
 本工具與任何遊戲公司無關。
+
+## Tests
+
+With Node.js installed, run `node --test tests/engine.test.cjs` to check random board generation and refilling. The website itself still runs directly in the browser.

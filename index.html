@@ -778,28 +778,28 @@ var Engine = (function () {
   }
 
   // Random board with no ready-made matches. colors: the orb codes to draw from (default the six colours);
-  // probs: optional weights for those codes.
-  function randomBoard(R, C, k, r, probs, colors) {
+  // probs: optional weights; initial: surviving orbs to keep, with -1 for holes. Returns null if no board was found.
+  function randomBoard(R, C, k, r, probs, colors, initial) {
     colors = colors && colors.length ? colors : [0, 1, 2, 3, 4, 5];
     if (!probs || probs.length !== colors.length) probs = colors.map(function () { return 1 / colors.length; });
-    var b;
+    var remaining = initial ? initial.slice() : new Array(R * C).fill(-1);
+    if (findGroups(remaining, R, C, k, true).length) return null;
     for (var tries = 0; tries < 200; tries++) {
-      b = [];
-      for (var i = 0; i < R * C; i++) {
-        var v, t = 0, bad;
-        do {
-          v = colors[pick(r, probs)]; t++; bad = false;
-          var rr = (i / C) | 0, cc = i % C, j;
-          if (v !== STONE) {
-            if (cc >= k - 1) { for (j = 1; j < k && b[i - j] === v; j++); if (j === k) bad = true; }
-            if (!bad && rr >= k - 1) { for (j = 1; j < k && b[i - j * C] === v; j++); if (j === k) bad = true; }
-          }
-        } while (bad && t < 40);
-        b.push(v);
+      var b = remaining.slice(), i;
+      for (i = 0; i < R * C; i++) {
+        if (remaining[i] >= 0) continue;
+        var choices = [], weights = [], total = 0;
+        colors.forEach(function (v, j) {
+          if (!(probs[j] > 0)) return;
+          b[i] = v;
+          if (!findGroups(b, R, C, k, true).length) { choices.push(v); weights.push(probs[j]); total += probs[j]; }
+        });
+        if (!choices.length) break;
+        b[i] = choices[pick(r, weights.map(function (w) { return w / total; }))];
       }
-      if (!findGroups(b, R, C, k, true).length) return b;
+      if (i === R * C) return b;
     }
-    return b;
+    return null;
   }
 
   // ----- board codes (URL-safe base64; v2) -----
@@ -1733,6 +1733,9 @@ I18N.ja.poolRules += "30点稼ぐごとにスーパーショットが1回使え�
 Object.assign(I18N.zh, { btnNext: "繼續 ›", autoNext: "放手後自動繼續", nEndless: "無限隨機：轉完後沿用消除後的盤面繼續（空格隨機補上），計平均 Combo 和平均時間。想換全新盤面可按上面的「隨機珠」標籤重新隨機。" });
 Object.assign(I18N.en, { btnNext: "Continue ›", autoNext: "Continue automatically after each move", nEndless: "Endless: after each move you carry on with the board left after clearing (empty cells are refilled at random), tracking average combos and time. For a brand-new board, use “New board with these” in the orb-types tag above." });
 Object.assign(I18N.ja, { btnNext: "続ける ›", autoNext: "指を離したら自動で続ける", nEndless: "エンドレス：消えた後の盤面をそのまま使って続けます（空きマスはランダムで補充）。平均コンボと平均時間を集計します。新しい盤面にするには上の「ドロップ」タグから作り直せます。" });
+Object.assign(I18N.zh, { nGenerateFailed: "未能生成沒有預先連好的盤面。請增加隨機珠的種類後再試。", nRefillFailed: "未能在保留剩餘寶珠的同時，補出沒有預先連好的盤面。請增加隨機珠的種類，或建立新的隨機盤面。" });
+Object.assign(I18N.en, { nGenerateFailed: "Couldn't create a board without ready-made matches. Select more orb types and try again.", nRefillFailed: "Couldn't refill without ready-made matches while keeping the remaining orbs. Select more orb types or start a new random board." });
+Object.assign(I18N.ja, { nGenerateFailed: "最初から消える並びのない盤面を作れませんでした。ランダムに使うドロップの種類を増やして、もう一度お試しください。", nRefillFailed: "残ったドロップを保ったまま、最初から消える並びのない補充ができませんでした。ドロップの種類を増やすか、新しいランダム盤面を作ってください。" });
 Object.assign(I18N.zh, { bkHead: "消除：", bkItem: "{o} {n} 串（{s} 粒）", bkSep: "、" });
 Object.assign(I18N.en, { bkHead: "Cleared: ", bkItem: "{o} ×{n} ({s} orbs)", bkSep: ", " });
 Object.assign(I18N.ja, { bkHead: "消去：", bkItem: "{o} {n} 個（{s} 個ずつ）", bkSep: "・" });
@@ -1866,6 +1869,7 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
   function timeLimit() { if (S.mode === "hell") return prefs.hellTime; return prefs.timeInf ? 0 : Math.max(0.5, Math.min(60, +prefs.timeLimit || 5)); }
 
   function setBoard(bd, src) {
+    if (!bd) { noteKey("nGenerateFailed", null, "bad"); return false; }
     stopAll();
     if (!prefs.exp) bd.match = 3;
     if (bd.roulMask == null) bd.roulMask = 63;
@@ -1874,6 +1878,7 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     if (src) S.src = src;
     save("pt.board", code());
     syncAll();
+    return true;
   }
   function resetLive() { stopAll(); S.live = S.bd.orbs.slice(); S.res = null; S.phase = "ready"; S.roulNext = performance.now() + S.bd.roulPeriod * 1000; syncResult(); S.dirty = true; }
   function stopAll() { if (S.nextTimer) { clearTimeout(S.nextTimer); S.nextTimer = null; } S.move = null; S.replay = null; }
@@ -2643,18 +2648,21 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
   // ---------- hell mode: 10 timed rounds, scored by average combos ----------
   function hellBoard(prevFinal) {
     if (prefs.hellSky && prevFinal && prevFinal.every(function (v) { return v >= 0; })) { var bd = JSON.parse(JSON.stringify(S.bd)); bd.orbs = prevFinal.slice(); return bd; }
-    var b = randomBd(); b.skyfall = prefs.hellSky; b.dark = b.dim = b.ninja = false; b.boosts = [0, 0, 0, 0, 0, 0]; return b;
+    var b = randomBd(); if (!b) return null;
+    b.skyfall = prefs.hellSky; b.dark = b.dim = b.ninja = false; b.boosts = [0, 0, 0, 0, 0, 0]; return b;
   }
   function hellReady(bd) {
+    if (!bd) { S.hell.state = "error"; S.phase = S.res ? "done" : "ready"; S.move = null; S.dirty = true; syncHud(); syncHell(); noteKey("nGenerateFailed", null, "bad"); return; }
     setBoard(bd, "srcRandom");
     var now = performance.now();
     S.hell.readyAt = now; S.hell.autoAt = now + 1000; S.hell.deadline = 0; S.hell.tStart = 0;
     syncHud(); syncHell();
   }
   function hellStart() {
+    var bd = hellBoard(null);
+    if (!bd) { noteKey("nGenerateFailed", null, "bad"); return; }
     stopAll();
     S.hell = { state: "run", round: 1, results: [], lastC: null };
-    var bd = hellBoard(null);
     setBoard(bd, "srcRandom");
     S.phase = "countdown"; S.hell.cdEnd = performance.now() + 3000; S.hell.autoAt = 0;
     $("btnHell").textContent = t("btnHellAgain");
@@ -3516,6 +3524,7 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
   function randomBd() {
     var rc = sizeRC(), bd = copySettings(blankBoard(rc[0], rc[1]), S.bd);
     bd.orbs = E.randomBoard(bd.rows, bd.cols, prefs.exp ? bd.match : 3, E.rng((Math.random() * 4294967295) >>> 0), null, randColors());
+    if (!bd.orbs) return null;
     bd.start = -1;
     return bd;
   }
@@ -3529,16 +3538,18 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     var r = S.res, fin = r && r.sim && r.sim.final;
     if (fresh !== true && fin && fin.length === N()) {
       var bd = JSON.parse(JSON.stringify(S.bd)), cols = randColors();
-      bd.orbs = fin.map(function (v) { return v >= 0 ? v : cols[Math.floor(Math.random() * cols.length)]; });
+      bd.orbs = E.randomBoard(bd.rows, bd.cols, matchK(), E.rng((Math.random() * 4294967295) >>> 0), null, cols, fin);
+      if (!bd.orbs) { noteKey("nRefillFailed", null, "bad"); return false; }
       bd.start = -1;
-      var keepNote = S.lastNote;
       setBoard(bd, "srcCont");
       syncResultFrom(r); showBreakdown(r); S.lastRec = toRec(r); $("btnReplay").disabled = false; $("btnSave").disabled = false;
-      return;
+      return true;
     }
-    setBoard(randomBd(), "srcRandom");
+    return setBoard(randomBd(), "srcRandom");
   }
   function setMode(mode, keepBoard) {
+    var hb = mode === "hell" ? hellBoard(null) : null;
+    if (mode === "hell" && !hb) { noteKey("nGenerateFailed", null, "bad"); return; }
     stopAll(); if (S.edit) setEdit(false);
     S.mode = mode;
     document.body.classList.remove("m-practice", "m-endless", "m-hell", "m-pool", "m-pattern"); document.body.classList.add("m-" + mode);
@@ -3553,11 +3564,11 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     $("cardRecords").hidden = mode === "hell" || pool;
     if (mode !== "hell") S.hell = null;
     syncStatUI();
-    if (mode === "endless") { nextEndless(true); syncStats(); noteKey("nEndless", null, ""); }
-    else if (mode === "hell") { S.hell = { state: "idle", round: 0, results: [] }; var hb = hellBoard(null); setBoard(hb, "srcRandom"); $("btnHell").textContent = t("btnHellStart"); syncHell(); noteKey("nHellIntro", null, ""); }
+    if (mode === "endless") { if (nextEndless(true)) { syncStats(); noteKey("nEndless", null, ""); } }
+    else if (mode === "hell") { S.hell = { state: "idle", round: 0, results: [] }; setBoard(hb, "srcRandom"); $("btnHell").textContent = t("btnHellStart"); syncHell(); noteKey("nHellIntro", null, ""); }
     else if (mode === "pattern") { Pat.ensure(); Pat.play(Pat.active()); }
     else if (pool) { var pb = E.decode(load("pt.practice", "")); if (pb) { S.bd = pb; S.live = pb.orbs.slice(); } layout(); Pool.rack(); }
-    else if (!keepBoard) { var saved = E.decode(load("pt.practice", "")); setBoard(saved || randomBd(), saved ? S.src : "srcRandom"); noteKey("noteIdle", null, ""); }
+    else if (!keepBoard) { var saved = E.decode(load("pt.practice", "")); if (setBoard(saved || randomBd(), saved ? S.src : "srcRandom")) noteKey("noteIdle", null, ""); }
   }
   function segBind(id, fn) {
     $(id).addEventListener("click", function (e) {
@@ -3570,7 +3581,7 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
   $("btnHell").addEventListener("click", hellStart);
   $("btnPool").addEventListener("click", function () { Pool.rack(); });
   $("btnSuper").addEventListener("click", function () { Pool.toggleSuper(); });
-  $("btnRandom").addEventListener("click", function () { setBoard(randomBd(), "srcRandom"); noteKey("nNew", null, ""); });
+  $("btnRandom").addEventListener("click", function () { if (setBoard(randomBd(), "srcRandom")) noteKey("nNew", null, ""); });
   $("modeTabs").addEventListener("click", function (e) { var b = e.target.closest("button"); if (b && b.dataset.mode !== S.mode) { if (S.mode === "practice") save("pt.practice", code()); setMode(b.dataset.mode); } });
   // ---------- quick-change tags above the board ----------
   function closeMenu() { $("chipMenu").hidden = true; S.menuFor = null; }
@@ -3581,7 +3592,7 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
     function opt(label, on, fn) { var b = document.createElement("button"); b.type = "button"; b.className = "small"; b.textContent = label; b.setAttribute("aria-pressed", on ? "true" : "false"); b.addEventListener("click", function () { fn(); closeMenu(); }); m.appendChild(b); }
     if (kind === "size") {
       var sizes = [["4x5", "5×4"], ["5x6", "6×5"], ["6x7", "7×6"]]; if (prefs.exp) sizes.push(["10x6", t("size10")]);
-      sizes.forEach(function (s) { opt(s[1], prefs.size === s[0], function () { prefs.size = s[0]; savePrefs(); if (S.mode === "hell") { if (!S.hell || S.hell.state !== "run") setBoard(hellBoard(null), "srcRandom"); } else { setBoard(randomBd(), "srcRandom"); if (S.mode === "practice") noteKey("nNew", null, ""); } }); });
+      sizes.forEach(function (s) { opt(s[1], prefs.size === s[0], function () { prefs.size = s[0]; savePrefs(); if (S.mode === "hell") { if (!S.hell || S.hell.state !== "run") setBoard(hellBoard(null), "srcRandom"); } else { if (setBoard(randomBd(), "srcRandom") && S.mode === "practice") noteKey("nNew", null, ""); } }); });
     } else if (kind === "time") {
       var hell = S.mode === "hell", cur = timeLimit();
       if (!hell) opt(t("chipNoLimit"), !cur, function () { prefs.timeInf = true; savePrefs(); syncSettings(); syncHud(); });
@@ -3596,7 +3607,7 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
       var grid = document.createElement("div"); grid.className = "order"; grid.id = "randGridQuick"; m.appendChild(grid);
       buildRandInto(grid);
       var again = document.createElement("button"); again.type = "button"; again.className = "small primary"; again.textContent = t("randAgain");
-      again.addEventListener("click", function () { closeMenu(); if (S.mode === "hell") { if (!S.hell || S.hell.state !== "run") setBoard(hellBoard(null), "srcRandom"); } else { setBoard(randomBd(), "srcRandom"); if (S.mode === "practice") noteKey("nNew", null, ""); } });
+      again.addEventListener("click", function () { closeMenu(); if (S.mode === "hell") { if (!S.hell || S.hell.state !== "run") setBoard(hellBoard(null), "srcRandom"); } else { if (setBoard(randomBd(), "srcRandom") && S.mode === "practice") noteKey("nNew", null, ""); } });
       m.appendChild(again);
     }
     m.hidden = false;
@@ -3755,12 +3766,15 @@ I18N.en.rule1 = I18N.en.rule1.replace("During <b>super darkness</b> no orbs are 
   $("btnClearLearn").addEventListener("click", function () { exemplars = []; save("pt.ex", exemplars); syncLearnNote(); if (S.imgData && S.rect) readShot(false); });
   $("btnClearSkins").addEventListener("click", function () { skinData = {}; save("pt.skins", skinData); applySkins(); S.dirty = true; });
   $("exp").addEventListener("change", function () {
+    var oldSize = prefs.size;
     prefs.exp = this.checked;
     if (!prefs.exp) {
       if (prefs.size === "10x6") prefs.size = "5x6";
+      var bd = S.bd.rows > 7 ? randomBd() : null;
+      if (S.bd.rows > 7 && !bd) { prefs.exp = true; prefs.size = oldSize; this.checked = true; noteKey("nGenerateFailed", null, "bad"); return; }
       S.bd.match = 3; S.bd.ninja = false;
       S.bd.orbs = S.bd.orbs.map(function (v) { return base(v) === 11 ? Math.floor(Math.random() * 6) : v; });
-      if (S.bd.rows > 7) { savePrefs(); setBoard(randomBd(), "srcRandom"); }
+      if (S.bd.rows > 7) { bd.ninja = false; savePrefs(); setBoard(bd, "srcRandom"); }
       else { S.live = S.bd.orbs.slice(); }
     }
     savePrefs(); syncSettings(); buildPalette(); boardSettingChanged(); syncPoolTab();
